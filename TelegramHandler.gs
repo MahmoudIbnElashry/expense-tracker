@@ -36,7 +36,10 @@ function sendTelegramMessage(chatId, text) {
 
 /**
  * Downloads a Telegram file by file_id via getFile -> file download.
- * Returns a Blob.
+ *
+ * Returns { blob, filePath }. The path is carried out because the download
+ * response is served as application/octet-stream, so its extension is one of
+ * the few hints available about what the file actually is.
  */
 function downloadTelegramFile_(fileId) {
   const token = requireProp_('TELEGRAM_BOT_TOKEN');
@@ -64,7 +67,8 @@ function downloadTelegramFile_(fileId) {
   }
 
   const blob = fileResponse.getBlob();
-  trace_('telegram.fileDownloaded', 'type=' + blob.getContentType() +
-    ' bytes=' + blob.getBytes().length);
-  return blob;
+  trace_('telegram.fileDownloaded', 'path=' + info.result.file_path +
+    ' servedType=' + blob.getContentType() + ' bytes=' + blob.getBytes().length);
+
+  return { blob: blob, filePath: info.result.file_path };
 }

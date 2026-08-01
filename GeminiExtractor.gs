@@ -105,25 +105,52 @@ function extractFromText_(text, messageDate) {
   return callGemini_([{ text: 'Expense message:\n' + text }], messageDate);
 }
 
-/** Extracts an expense from a photo (receipt), with an optional caption. */
-function extractFromPhoto_(fileId, caption, messageDate) {
-  const blob = downloadTelegramFile_(fileId);
-  const mimeType = blob.getContentType() || 'image/jpeg';
+/**
+ * Extracts expenses from a receipt image or PDF, with an optional caption.
+ *
+ * `attachment` is { fileId, declaredMime, kind } from extractAttachment_.
+ * The MIME type is resolved here rather than taken from the download: Telegram
+ * serves every file as application/octet-stream, which Gemini rejects with a
+ * 400 "Unsupported MIME type".
+ */
+function extractFromAttachment_(attachment, caption, messageDate) {
+  const download = downloadTelegramFile_(attachment.fileId);
+  const bytes = download.blob.getBytes();
 
-  const parts = [{
-    inlineData: {
-      mimeType: mimeType,
-      data: Utilities.base64Encode(blob.getBytes())
+  if (bytes.length > MAX_INLINE_BYTES) {
+    throw new Error('That file is ' + Math.round(bytes.length / 1048576) +
+      'MB. Please send something under ' + Math.round(MAX_INLINE_BYTES / 1048576) + 'MB.');
+  }
+
+  const mimeType = resolveMimeType_(
+    bytes,
+    attachment.declaredMime,
+    download.filePath,
+    attachment.kind === 'photo' ? 'image/jpeg' : null);
+
+  // Recorded on the attachment so the caller can label the Raw Input column
+  // without having to resolve the type a second time.
+  attachment.resolvedMime = mimeType;
+
+  trace_('attachment.mime', 'resolved=' + mimeType +
+    ' declared=' + attachment.declaredMime + ' path=' + download.filePath);
+
+  if (!isSupportedMimeType_(mimeType)) {
+    throw new Error("I can read receipt photos and PDFs, but not that file type" +
+      (mimeType ? ' (' + mimeType + ')' : '') + '.');
+  }
+
+  const isPdf = mimeType === 'application/pdf';
+  const noun = isPdf ? 'Receipt PDF' : 'Receipt photo';
+
+  return callGemini_([
+    { inlineData: { mimeType: mimeType, data: Utilities.base64Encode(bytes) } },
+    {
+      text: caption
+        ? noun + '. User note: ' + caption + '\nRead the total from the receipt.'
+        : noun + '. Read the total paid and what was bought.'
     }
-  }];
-
-  parts.push({
-    text: caption
-      ? 'Receipt photo. User note: ' + caption + '\nRead the total from the receipt.'
-      : 'Receipt photo. Read the total paid and what was bought.'
-  });
-
-  return callGemini_(parts, messageDate);
+  ], messageDate);
 }
 
 /** The API version to call, overridable via the GEMINI_API_VERSION property. */

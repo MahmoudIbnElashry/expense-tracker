@@ -93,6 +93,82 @@ function isCancelIntent_(text) {
 }
 
 /**
+ * Identifies a file from its leading bytes.
+ *
+ * Preferred over any declared type, because Telegram's file download serves
+ * application/octet-stream and its document.mime_type is whatever the sending
+ * client claimed. The bytes are the only source that cannot be wrong.
+ *
+ * Apps Script's getBytes() returns signed Java bytes, hence the & 0xFF.
+ */
+function sniffMimeType_(bytes) {
+  if (!bytes || bytes.length < 12) return null;
+
+  const b = [];
+  for (let i = 0; i < 12; i++) b.push(bytes[i] & 0xFF);
+
+  if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf';
+
+  // RIFF....WEBP
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) {
+    return 'image/webp';
+  }
+
+  // ISO-BMFF container: bytes 4-7 are "ftyp", 8-11 are the brand.
+  if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]).toLowerCase();
+    if (['heic', 'heix', 'hevc', 'hevx'].indexOf(brand) !== -1) return 'image/heic';
+    if (['mif1', 'msf1', 'heim', 'heis'].indexOf(brand) !== -1) return 'image/heif';
+  }
+
+  return null;
+}
+
+/** Maps a file path or name to a MIME type by extension. */
+function mimeFromPath_(path) {
+  const match = String(path || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  if (!match) return null;
+
+  switch (match[1]) {
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'png': return 'image/png';
+    case 'webp': return 'image/webp';
+    case 'heic': return 'image/heic';
+    case 'heif': return 'image/heif';
+    case 'pdf': return 'application/pdf';
+    default: return null;
+  }
+}
+
+function isSupportedMimeType_(mimeType) {
+  return SUPPORTED_MIME_TYPES.indexOf(String(mimeType || '').toLowerCase()) !== -1;
+}
+
+/**
+ * Settles on a MIME type Gemini will accept, or null.
+ *
+ * Order matters: the magic bytes win, then whatever Telegram declared, then
+ * the file extension. `photoDefault` covers the last case - Telegram
+ * re-encodes every compressed photo to JPEG, so a photo message with
+ * unreadable bytes is still safely a JPEG.
+ */
+function resolveMimeType_(bytes, declaredMime, filePath, photoDefault) {
+  const sniffed = sniffMimeType_(bytes);
+  if (sniffed) return sniffed;
+
+  if (isSupportedMimeType_(declaredMime)) return String(declaredMime).toLowerCase();
+
+  const fromPath = mimeFromPath_(filePath);
+  if (fromPath) return fromPath;
+
+  return photoDefault || null;
+}
+
+/**
  * Matches a model-supplied value against a fixed list, case- and
  * whitespace-insensitively. Falls back to the given default on no match.
  */

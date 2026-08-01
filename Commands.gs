@@ -125,7 +125,7 @@ function helpText_() {
     'Just send what you spent, e.g.:',
     '• "120 taxi to work"',
     '• "اشتريت أكل بـ 350"',
-    '• a photo of a receipt',
+    '• a photo or PDF of a receipt',
     '',
     'If I ask what you meant, answer it — or say "cancel"',
     'or /cancel and nothing gets logged.',

@@ -216,10 +216,18 @@ function handleUpdate_(update) {
     return;
   }
 
-  const photoFileId = extractPhotoFileId_(message);
-  if (photoFileId) {
-    trace_('route.photo');
-    handleExpenseInput_(chatId, message, photoFileId);
+  const attachment = extractAttachment_(message);
+  if (attachment) {
+    if (isUnsupportedDocument_(attachment)) {
+      trace_('route.rejected', attachment.declaredMime);
+      sendTelegramMessage(chatId,
+        'I can read receipt photos and PDFs — that looks like a ' +
+        attachment.declaredMime + ' file.');
+      return;
+    }
+
+    trace_('route.' + attachment.kind, attachment.declaredMime);
+    handleExpenseInput_(chatId, message, attachment);
     return;
   }
 
@@ -262,10 +270,10 @@ function isAllowedChat_(chatId) {
 }
 
 /**
- * Runs extraction on a text or photo message and logs the result.
- * `photoFileId` is null for text-only messages.
+ * Runs extraction on a text or attachment message and logs the result.
+ * `attachment` is null for text-only messages.
  */
-function handleExpenseInput_(chatId, message, photoFileId) {
+function handleExpenseInput_(chatId, message, attachment) {
   // message.date is seconds since epoch. If it were ever missing, the old
   // code threw here - outside every try - and the request ended with no reply
   // and no log. Compute it defensively and trace what was used.
@@ -284,9 +292,9 @@ function handleExpenseInput_(chatId, message, photoFileId) {
 
   let extraction;
   try {
-    trace_('gemini.start', photoFileId ? 'photo' : 'text');
-    extraction = photoFileId
-      ? extractFromPhoto_(photoFileId, caption, messageDate)
+    trace_('gemini.start', attachment ? attachment.kind : 'text');
+    extraction = attachment
+      ? extractFromAttachment_(attachment, caption, messageDate)
       : extractFromText_(message.text, messageDate);
     trace_('gemini.done', extraction);
   } catch (err) {
@@ -310,8 +318,8 @@ function handleExpenseInput_(chatId, message, photoFileId) {
     return;
   }
 
-  const rawInput = photoFileId
-    ? (caption ? 'Photo: ' + caption : 'Photo')
+  const rawInput = attachment
+    ? attachmentRawInput_(attachment, caption)
     : message.text;
 
   let ids;
@@ -358,17 +366,59 @@ function formatConfirmation_(expenses) {
   return lines.join('\n');
 }
 
-/** Returns the file_id of the highest-resolution photo, or null. */
-function extractPhotoFileId_(message) {
+/**
+ * What goes in the Raw Input column for an attachment. Reads the type
+ * resolved during extraction, so a receipt sent as a PDF is recorded as one
+ * rather than as a photo.
+ */
+function attachmentRawInput_(attachment, caption) {
+  const label = attachment.resolvedMime === 'application/pdf' ? 'PDF' : 'Photo';
+  return caption ? label + ': ' + caption : label;
+}
+
+/**
+ * Describes a receipt attachment as { fileId, declaredMime, kind }, or null.
+ *
+ * Documents are accepted whatever they claim to be; the type is settled after
+ * download from the actual bytes, since a genuine JPEG sent from a file
+ * manager often arrives declared as application/octet-stream.
+ */
+function extractAttachment_(message) {
   if (message.photo && message.photo.length) {
-    // Telegram orders photo sizes smallest to largest.
-    return message.photo[message.photo.length - 1].file_id;
+    return {
+      // Telegram orders photo sizes smallest to largest.
+      fileId: message.photo[message.photo.length - 1].file_id,
+      // Telegram re-encodes every compressed photo to JPEG regardless of what
+      // was uploaded, so this default is safe even if the bytes are unreadable.
+      declaredMime: 'image/jpeg',
+      kind: 'photo'
+    };
   }
-  // Receipts sent from the gallery as a file arrive as a document.
-  if (message.document && /^image\//.test(message.document.mime_type || '')) {
-    return message.document.file_id;
+
+  // Receipts sent from the gallery or a file manager arrive as a document.
+  if (message.document) {
+    return {
+      fileId: message.document.file_id,
+      declaredMime: String(message.document.mime_type || '').toLowerCase(),
+      kind: 'document'
+    };
   }
+
   return null;
+}
+
+/**
+ * True when a document declares a type we know Gemini will not accept, so it
+ * can be turned away without spending a download on it. An empty or generic
+ * declaration is not rejected here - only the bytes can settle those.
+ */
+function isUnsupportedDocument_(attachment) {
+  if (attachment.kind !== 'document') return false;
+
+  const declared = attachment.declaredMime;
+  if (!declared || declared === 'application/octet-stream') return false;
+
+  return !isSupportedMimeType_(declared);
 }
 
 /**

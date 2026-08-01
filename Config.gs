@@ -106,6 +106,26 @@ const CANCEL_PHRASES = [
   'la', 'la2', 'msh mohem'
 ];
 
+/**
+ * MIME types Gemini accepts as inline data. Anything else is rejected before
+ * the request, since the API answers an unknown type with a 400.
+ */
+const SUPPORTED_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+  'application/pdf'
+];
+
+/**
+ * Cap on the raw attachment size. Inline data shares a 20MB total request
+ * budget with the prompt, and base64 inflates bytes by about a third, so this
+ * leaves comfortable headroom.
+ */
+const MAX_INLINE_BYTES = 10 * 1024 * 1024;
+
 /** Fallbacks used when Gemini returns a value outside the fixed lists. */
 const DEFAULTS = {
   ITEM: 'Other / Miscellaneous',
