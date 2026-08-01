@@ -166,19 +166,54 @@ function extractPhotoFileId_(message) {
 }
 
 /**
+ * The deployed Web app URL.
+ *
+ * Must be the "Web app" URL from Manage deployments - the one under
+ * /macros/s/<deploymentId>/exec. The dialog also shows a "Library" URL
+ * (/macros/library/d/<scriptId>/<version>) for the same deployment; that one
+ * has no HTTP endpoint and makes every Telegram POST return 404.
+ *
+ * Redeploying an existing deployment keeps this URL, so it only changes if a
+ * brand new deployment is created.
+ */
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzRf-JgFH5RQPBJ3qGVQR5PH0Uqj8mPqCirGFe4KEu2UR6QsNa3SjUJB5k3F7J-eEi7dg/exec';
+
+/**
  * Run once from the Apps Script editor after deploying, to point Telegram at
- * this web app. Replace the URL if you create a new deployment.
+ * this web app.
  */
 function setWebhook() {
-  const token = requireProp_('TELEGRAM_BOT_TOKEN');
-  const webAppUrl = 'https://script.google.com/macros/library/d/1SbUpsmtgPa5S60PRMOLfXVm7VJUsB2chEzCeDrR4gLeEbw74kC5FRLVL/3';
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(WEB_APP_URL)) {
+    throw new Error('WEB_APP_URL is not a Web app /exec URL. Copy the "Web app" ' +
+      'entry from Manage deployments, not the "Library" one.');
+  }
 
+  const token = requireProp_('TELEGRAM_BOT_TOKEN');
   const url = 'https://api.telegram.org/bot' + token + '/setWebhook' +
-    '?url=' + encodeURIComponent(webAppUrl) +
+    '?url=' + encodeURIComponent(WEB_APP_URL) +
     '&drop_pending_updates=true';
 
   const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   console.log(response.getContentText());
+}
+
+/**
+ * Diagnostic: shows what Telegram currently thinks the webhook is, including
+ * the last delivery error. Safer than opening the getWebhookInfo URL in a
+ * browser, which puts the bot token into browser history.
+ */
+function getWebhookInfo() {
+  const token = requireProp_('TELEGRAM_BOT_TOKEN');
+  const response = UrlFetchApp.fetch(
+    'https://api.telegram.org/bot' + token + '/getWebhookInfo',
+    { muteHttpExceptions: true });
+
+  const info = JSON.parse(response.getContentText());
+  console.log(JSON.stringify(info, null, 2));
+
+  if (info.result && info.result.url !== WEB_APP_URL) {
+    console.warn('Registered webhook does not match WEB_APP_URL. Run setWebhook.');
+  }
 }
 
 /**
