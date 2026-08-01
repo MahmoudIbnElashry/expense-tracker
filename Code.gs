@@ -224,6 +224,15 @@ function handleUpdate_(update) {
   }
 
   if (text) {
+    // Checked before Gemini. Without this, "forget it" and "no thanks" are
+    // just more vague messages, so each one comes back with another
+    // clarifying question and there is no way out of the exchange.
+    if (isCancelIntent_(text)) {
+      trace_('route.cancel', JSON.stringify(text.slice(0, 80)));
+      sendTelegramMessage(chatId, 'Cancelled — nothing logged.');
+      return;
+    }
+
     trace_('route.text', JSON.stringify(text.slice(0, 200)));
     handleExpenseInput_(chatId, message, null);
     return;
@@ -291,7 +300,11 @@ function handleExpenseInput_(chatId, message, photoFileId) {
   if (extraction.needs_clarification || !isValidAmount_(extraction.amount) || !extraction.description) {
     trace_('clarify', 'needs_clarification=' + extraction.needs_clarification +
       ' amount=' + extraction.amount + ' description=' + JSON.stringify(extraction.description));
-    sendTelegramMessage(chatId, extraction.clarification_question || 'How much was it?');
+    // The hint matters: nothing is stored between messages, so the way out of
+    // a clarification is to say so, and that has to be discoverable.
+    sendTelegramMessage(chatId,
+      (extraction.clarification_question || 'How much was it?') +
+      '\n\n(or /cancel to drop it)');
     return;
   }
 

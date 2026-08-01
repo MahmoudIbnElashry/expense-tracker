@@ -60,6 +60,39 @@ function formatMoney_(value) {
 }
 
 /**
+ * Flattens a message for intent matching: lowercases, strips Arabic
+ * diacritics and tatweel, folds alef/yaa/taa-marbuta spelling variants, and
+ * replaces anything that is not an ASCII or Arabic letter or digit (including
+ * punctuation and emoji) with a space.
+ *
+ * Deliberately avoids \p{...} escapes so it does not depend on Unicode
+ * property support in the runtime.
+ */
+function normalizeForIntent_(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[ً-ْٰـ]/g, '')  // tashkeel and tatweel
+    .replace(/[أإآٱ]/g, 'ا')  // أ إ آ ٱ -> ا
+    .replace(/ى/g, 'ي')                  // ى -> ي
+    .replace(/ة/g, 'ه')                  // ة -> ه
+    .replace(/[^a-z0-9؀-ۿ\s]/g, ' ')     // punctuation, emoji, etc.
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * True when the whole message means "drop it".
+ *
+ * Whole-message only: a substring test would swallow real expenses like
+ * "cancelled gym membership 300".
+ */
+function isCancelIntent_(text) {
+  const normalized = normalizeForIntent_(text);
+  if (!normalized) return false;
+  return CANCEL_PHRASES.indexOf(normalized) !== -1;
+}
+
+/**
  * Matches a model-supplied value against a fixed list, case- and
  * whitespace-insensitively. Falls back to the given default on no match.
  */

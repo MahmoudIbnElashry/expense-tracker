@@ -18,6 +18,13 @@ function handleCommand_(chatId, text) {
       handleReportCommand_(chatId, argument);
       return;
 
+    case '/cancel':
+      // Nothing to clear - messages are handled independently, with no state
+      // carried between them. This exists as a guaranteed way to end a
+      // clarification exchange, and says plainly that nothing was written.
+      sendTelegramMessage(chatId, 'Cancelled — nothing logged.');
+      return;
+
     case '/id':
       sendTelegramMessage(chatId, 'This chat ID: ' + chatId);
       return;
@@ -118,7 +125,11 @@ function helpText_() {
     '• "اشتريت أكل بـ 350"',
     '• a photo of a receipt',
     '',
+    'If I ask what you meant, answer it — or say "cancel"',
+    'or /cancel and nothing gets logged.',
+    '',
     'Commands:',
+    '/cancel — drop the current message',
     '/report — this month\'s summary',
     '/report July 2026 — a specific month',
     '/id — show this chat ID',

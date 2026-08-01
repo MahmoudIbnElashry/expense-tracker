@@ -76,6 +76,29 @@ const PAYMENT_METHODS = ['Cash', 'Credit Card', 'Instapay', 'Other'];
 
 const BENEFICIARIES = ['Personal', 'Tamim', 'Asmaa', 'Family', 'Other'];
 
+/**
+ * Messages that mean "drop it" rather than "log this".
+ *
+ * Matched against the whole normalized message, never as a substring, so
+ * "cancel gym membership 300" is still treated as an expense. Compared after
+ * normalizeForIntent_ strips punctuation, diacritics, and alef/yaa variants -
+ * so entries here are written in their already-normalized form.
+ */
+const CANCEL_PHRASES = [
+  // English
+  'cancel', 'cancelled', 'canceled', 'forget it', 'forget this', 'forget that',
+  'never mind', 'nevermind', 'nvm', 'no', 'nope', 'no thanks', 'no thank you',
+  'nothing', 'none', 'skip', 'skip it', 'stop', 'ignore', 'ignore it',
+  'ignore this', 'drop it', 'leave it', 'abort', 'undo', 'na',
+  // Arabic
+  'لا', 'لاء', 'لا شكرا', 'الغي', 'الغاء', 'الغيها', 'بلاش', 'خلاص', 'انسي', 'انساها',
+  'مش مهم', 'مش مهمه', 'سيبك', 'سيبها', 'مفيش', 'مفيش حاجه', 'مش عايز',
+  'مش عايزه', 'ولا حاجه', 'مش هحسبها',
+  // Franco-Arabic
+  'khalas', 'balash', 'kansel', 'cancel it', 'mesh mohem', 'mish mohem',
+  'la', 'la2', 'msh mohem'
+];
+
 /** Fallbacks used when Gemini returns a value outside the fixed lists. */
 const DEFAULTS = {
   ITEM: 'Other / Miscellaneous',
