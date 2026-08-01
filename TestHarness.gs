@@ -112,6 +112,15 @@ function testSheetWrite() {
 }
 
 /**
+ * Lists the Gemini models the configured key can reach, on every API version.
+ * Run this first when generateContent returns 404 - it answers which model
+ * name and API version are actually valid, instead of guessing.
+ */
+function testGeminiModels() {
+  console.log(probeGeminiModels_());
+}
+
+/**
  * Verifies the tracing layer cannot throw, since that is what took down every
  * request in @5. Run this after any change to Trace.gs.
  */

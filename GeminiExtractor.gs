@@ -97,10 +97,42 @@ function extractFromPhoto_(fileId, caption, messageDate) {
   return callGemini_(parts, messageDate);
 }
 
+/** The API version to call, overridable via the GEMINI_API_VERSION property. */
+function geminiApiVersion_() {
+  return String(getProp_('GEMINI_API_VERSION') || CONFIG.GEMINI_API_VERSION).trim();
+}
+
+/**
+ * The model name to call. Set the GEMINI_MODEL script property to change it -
+ * no code change or redeploy required.
+ *
+ * IF /ping OR AN EXPENSE STARTS RETURNING 404, THE MODEL WAS PROBABLY RETIRED.
+ * Run /models (or testGeminiModels in the editor) and pick a current name from
+ * https://ai.google.dev/gemini-api/docs/models, then update the property.
+ * Note that a retired model can still appear in ListModels for a while even
+ * though generateContent already 404s on it - that is how gemini-2.5-flash-lite
+ * failed here, so trust the 404 over the listing.
+ *
+ * Trims whitespace and strips a leading "models/", because the docs and the
+ * ListModels response both use the fully-qualified "models/<name>" form while
+ * the request path already supplies the "models/" segment. Pasting the
+ * qualified name into the GEMINI_MODEL property would otherwise produce
+ * .../models/models/<name>:generateContent - a 404.
+ */
+function geminiModelName_() {
+  const raw = String(getProp_('GEMINI_MODEL') || CONFIG.GEMINI_MODEL).trim();
+  return raw.replace(/^models\//, '');
+}
+
+/** Builds a fully-qualified Generative Language API URL. */
+function geminiUrl_(path) {
+  return CONFIG.GEMINI_HOST + '/' + geminiApiVersion_() + '/' + path;
+}
+
 /** Calls generateContent and returns a normalized extraction object. */
 function callGemini_(parts, messageDate) {
   const apiKey = requireProp_('GEMINI_API_KEY');
-  const model = getProp_('GEMINI_MODEL') || CONFIG.GEMINI_MODEL;
+  const model = geminiModelName_();
 
   const generationConfig = {
     temperature: 0,
@@ -108,10 +140,19 @@ function callGemini_(parts, messageDate) {
     responseSchema: buildExtractionSchema_()
   };
 
-  // Gemini 2.5 supports disabling thinking outright, which keeps the webhook
-  // fast. Newer families use a different knob, so only send it for 2.5.
+  // Thinking costs latency, which matters on a webhook Telegram will retry.
+  // The two model families take different knobs and an invalid one is a 400,
+  // so send each only where it is valid:
+  //   2.5  -> thinkingBudget: 0 disables thinking outright
+  //   3.x  -> thinkingLevel, opt-in via GEMINI_THINKING_LEVEL (e.g. "low"),
+  //           left unset by default so the API default applies
   if (model.indexOf('gemini-2.5') === 0) {
     generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  } else {
+    const thinkingLevel = getProp_('GEMINI_THINKING_LEVEL');
+    if (thinkingLevel) {
+      generationConfig.thinkingConfig = { thinkingLevel: thinkingLevel.trim() };
+    }
   }
 
   const payload = {
@@ -122,30 +163,124 @@ function callGemini_(parts, messageDate) {
 
   // The key goes in a header, not the URL, so it can never leak into a logged
   // error string.
-  const response = UrlFetchApp.fetch(CONFIG.GEMINI_BASE_URL + model + ':generateContent', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-goog-api-key': apiKey },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
+  const endpoint = geminiUrl_('models/' + model + ':generateContent');
+  trace_('gemini.request', 'POST ' + endpoint + ' parts=' + parts.length +
+    ' keyLength=' + apiKey.length + ' keyPrefix=' + apiKey.slice(0, 5));
 
-  const status = response.getResponseCode();
-  if (status !== 200) {
-    throw new Error('Gemini API returned ' + status + ': ' + response.getContentText().slice(0, 400));
+  let response;
+  try {
+    response = UrlFetchApp.fetch(endpoint, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    traceError_('gemini.fetch', err);
+    throw err;
   }
 
-  const body = JSON.parse(response.getContentText());
+  const status = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (status !== 200) {
+    // Log the whole body, not a summary. The API's own error message names
+    // the exact problem (bad model, wrong API version, disabled API), and
+    // it never echoes the key back - that stays in the request header.
+    trace_('gemini.error', 'status=' + status + ' endpoint=' + endpoint + ' body=' + text);
+    throw new Error('Gemini ' + status + ' for ' + endpoint + '\n' + text.slice(0, 600));
+  }
+
+  trace_('gemini.response', 'status=' + status + ' bytes=' + text.length);
+
+  const body = JSON.parse(text);
   const candidate = body.candidates && body.candidates[0];
   const responseParts = candidate && candidate.content && candidate.content.parts;
 
+  if (body.usageMetadata) {
+    trace_('gemini.usage', body.usageMetadata);
+  }
+
   if (!responseParts || !responseParts.length) {
     throw new Error('Gemini returned no content (finishReason: ' +
-      (candidate ? candidate.finishReason : 'none') + ')');
+      (candidate ? candidate.finishReason : 'none') + ', body: ' + text.slice(0, 300) + ')');
   }
 
   const raw = responseParts.map(function (p) { return p.text || ''; }).join('');
+  trace_('gemini.raw', raw.slice(0, 600));
   return normalizeExtraction_(parseJsonLoose_(raw), messageDate);
+}
+
+/**
+ * Asks the API which models this key can actually reach, which is exactly
+ * what a 404 from generateContent tells you to do. Returns a report string.
+ *
+ * Probes each API version so a version mismatch is visible rather than
+ * inferred, and never prints the key.
+ */
+function probeGeminiModels_() {
+  const apiKey = requireProp_('GEMINI_API_KEY');
+  const lines = [
+    'Key: ' + apiKey.length + ' chars, prefix "' + apiKey.slice(0, 5) + '"',
+    'Configured: ' + geminiModelName_() + ' on ' + geminiApiVersion_()
+  ];
+
+  ['v1beta', 'v1'].forEach(function (version) {
+    const url = CONFIG.GEMINI_HOST + '/' + version + '/models?pageSize=200';
+    lines.push('');
+    lines.push('--- ' + version + ' ---');
+
+    let response;
+    try {
+      response = UrlFetchApp.fetch(url, {
+        method: 'get',
+        headers: { 'x-goog-api-key': apiKey },
+        muteHttpExceptions: true
+      });
+    } catch (err) {
+      lines.push('fetch failed: ' + err);
+      return;
+    }
+
+    const status = response.getResponseCode();
+    const text = response.getContentText();
+
+    if (status !== 200) {
+      lines.push('HTTP ' + status + ': ' + text.slice(0, 300));
+      return;
+    }
+
+    let models;
+    try {
+      models = JSON.parse(text).models || [];
+    } catch (err) {
+      lines.push('unparseable response: ' + text.slice(0, 200));
+      return;
+    }
+
+    const usable = models.filter(function (m) {
+      const methods = m.supportedGenerationMethods || [];
+      return methods.indexOf('generateContent') !== -1;
+    }).map(function (m) {
+      return String(m.name).replace(/^models\//, '');
+    });
+
+    lines.push(usable.length + ' models support generateContent');
+
+    // Flash-Lite first - that is what this bot wants.
+    const lite = usable.filter(function (n) { return n.indexOf('flash-lite') !== -1; });
+    if (lite.length) lines.push('flash-lite: ' + lite.join(', '));
+
+    const flash = usable.filter(function (n) {
+      return n.indexOf('flash') !== -1 && n.indexOf('flash-lite') === -1;
+    });
+    if (flash.length) lines.push('flash: ' + flash.slice(0, 10).join(', '));
+
+    lines.push('configured model present: ' + (usable.indexOf(geminiModelName_()) !== -1));
+  });
+
+  return lines.join('\n');
 }
 
 /** Parses JSON, tolerating a stray markdown code fence. */
@@ -154,6 +289,7 @@ function parseJsonLoose_(text) {
   try {
     return JSON.parse(cleaned);
   } catch (err) {
+    traceError_('gemini.parse (retrying on brace slice)', err);
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start !== -1 && end > start) {

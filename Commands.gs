@@ -30,6 +30,10 @@ function handleCommand_(chatId, text) {
       handlePingCommand_(chatId);
       return;
 
+    case '/models':
+      handleModelsCommand_(chatId);
+      return;
+
     default:
       sendTelegramMessage(chatId, 'Unknown command. Try /help.');
   }
@@ -95,6 +99,16 @@ function handlePingCommand_(chatId) {
   sendTelegramMessage(chatId, lines.join('\n'));
 }
 
+/** Reports which Gemini models the configured key can actually reach. */
+function handleModelsCommand_(chatId) {
+  try {
+    sendTelegramMessage(chatId, probeGeminiModels_());
+  } catch (err) {
+    traceError_('models', err);
+    sendTelegramMessage(chatId, '⚠️ Model probe failed:\n' + String(err.message).slice(0, 500));
+  }
+}
+
 function helpText_() {
   return [
     'Masrofna — expense tracker',
@@ -109,6 +123,7 @@ function helpText_() {
     '/report July 2026 — a specific month',
     '/id — show this chat ID',
     '/ping — check sheet + Gemini connectivity',
+    '/models — list reachable Gemini models',
     '/debug — trace from the previous message'
   ].join('\n');
 }

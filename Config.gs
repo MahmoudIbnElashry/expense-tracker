@@ -11,7 +11,11 @@
  *   GEMINI_API_KEY      - from Google AI Studio
  *
  * Optional Script Properties:
- *   GEMINI_MODEL        - override the default model name
+ *   GEMINI_MODEL        - override the default model name. Check
+ *                         https://ai.google.dev/gemini-api/docs/models or run
+ *                         /models if generateContent starts returning 404.
+ *   GEMINI_API_VERSION  - override the default API version (v1beta)
+ *   GEMINI_THINKING_LEVEL - thinkingLevel for Gemini 3.x models (e.g. "low")
  *   ALLOWED_CHAT_IDS    - comma-separated chat IDs; if set, all others ignored
  */
 
@@ -21,8 +25,13 @@ const CONFIG = {
   SHEET_NAME: 'Expenses',
   ID_PREFIX: 'EXP-',
   ID_START: 1001,
-  GEMINI_MODEL: 'gemini-2.5-flash-lite',
-  GEMINI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/models/',
+  // Fallback only - the GEMINI_MODEL script property overrides this, so
+  // swapping models needs no redeploy. Kept current rather than left at a
+  // retired model, so a missing or misspelled property degrades to something
+  // that actually works.
+  GEMINI_MODEL: 'gemini-3.1-flash-lite',
+  GEMINI_HOST: 'https://generativelanguage.googleapis.com',
+  GEMINI_API_VERSION: 'v1beta',
   // How long a *handled* update stays remembered. CacheService caps entries
   // at 6 hours, well past Telegram's retry window for a single update.
   DEDUP_TTL_SECONDS: 21600,
