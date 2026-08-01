@@ -7,16 +7,30 @@ function sendTelegramMessage(chatId, text) {
   const token = requireProp_('TELEGRAM_BOT_TOKEN');
   const url = 'https://api.telegram.org/bot' + token + '/sendMessage';
 
-  const response = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify({ chat_id: chatId, text: text }),
-    muteHttpExceptions: true
-  });
+  let response;
+  try {
+    response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      // Telegram rejects messages over 4096 characters.
+      payload: JSON.stringify({ chat_id: chatId, text: String(text).slice(0, 4000) }),
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    traceError_('telegram.sendMessage fetch', err);
+    throw err;
+  }
 
-  if (response.getResponseCode() !== 200) {
-    console.error('sendMessage failed (' + response.getResponseCode() + '): ' +
-      response.getContentText().slice(0, 300));
+  const status = response.getResponseCode();
+  if (status !== 200) {
+    // Telegram error bodies do not contain the token, so this is safe to log.
+    traceError_('telegram.sendMessage status=' + status,
+      new Error(response.getContentText().slice(0, 300)));
+  } else {
+    // Recorded so dedup can treat a replied-to update as handled even if a
+    // later step throws - otherwise a retry would send the reply twice.
+    markReplySent_();
+    trace_('telegram.sent', 'chatId=' + chatId + ' chars=' + String(text).length);
   }
 }
 
@@ -26,6 +40,7 @@ function sendTelegramMessage(chatId, text) {
  */
 function downloadTelegramFile_(fileId) {
   const token = requireProp_('TELEGRAM_BOT_TOKEN');
+  trace_('telegram.getFile', 'fileId=' + fileId);
 
   const infoResponse = UrlFetchApp.fetch(
     'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(fileId),
@@ -48,5 +63,8 @@ function downloadTelegramFile_(fileId) {
     throw new Error('File download failed with status ' + fileResponse.getResponseCode());
   }
 
-  return fileResponse.getBlob();
+  const blob = fileResponse.getBlob();
+  trace_('telegram.fileDownloaded', 'type=' + blob.getContentType() +
+    ' bytes=' + blob.getBytes().length);
+  return blob;
 }

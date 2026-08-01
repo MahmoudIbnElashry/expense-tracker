@@ -8,9 +8,14 @@
 /** Opens the Expenses sheet, falling back to the first sheet. */
 function getExpenseSheet_() {
   const spreadsheet = SpreadsheetApp.openById(requireProp_('SHEET_ID'));
-  const sheet = spreadsheet.getSheetByName(CONFIG.SHEET_NAME) || spreadsheet.getSheets()[0];
+  const named = spreadsheet.getSheetByName(CONFIG.SHEET_NAME);
+  const sheet = named || spreadsheet.getSheets()[0];
   if (!sheet) {
     throw new Error('No sheet found in spreadsheet');
+  }
+  if (!named) {
+    trace_('sheet.fallback', 'no tab named "' + CONFIG.SHEET_NAME +
+      '", using first tab "' + sheet.getName() + '"');
   }
   return sheet;
 }
@@ -27,8 +32,9 @@ function appendExpense_(extraction, rawInput) {
 
   try {
     const sheet = getExpenseSheet_();
-    const id = nextExpenseId_(sheet);
+    const id = CONFIG.ID_PREFIX + nextExpenseNumber_(sheet);
     const date = parseDdMmYyyy_(extraction.date) || new Date();
+    trace_('sheet.append', 'tab="' + sheet.getName() + '" lastRow=' + sheet.getLastRow() + ' id=' + id);
 
     sheet.appendRow([
       id,
@@ -52,11 +58,11 @@ function appendExpense_(extraction, rawInput) {
 }
 
 /**
- * Builds the next ID from the highest existing EXP-nnnn in column A.
+ * The next ID number, from the highest existing EXP-nnnn in column A.
  * Scanning for the max (rather than reading the last row) survives rows that
  * were deleted, reordered, or sorted.
  */
-function nextExpenseId_(sheet) {
+function nextExpenseNumber_(sheet) {
   const lastRow = sheet.getLastRow();
   let highest = CONFIG.ID_START - 1;
 
@@ -73,5 +79,5 @@ function nextExpenseId_(sheet) {
     }
   }
 
-  return CONFIG.ID_PREFIX + (highest + 1);
+  return highest + 1;
 }

@@ -23,9 +23,13 @@ const CONFIG = {
   ID_START: 1001,
   GEMINI_MODEL: 'gemini-2.5-flash-lite',
   GEMINI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/models/',
-  // CacheService caps entries at 6 hours, which is well past Telegram's
-  // retry window for a single update.
+  // How long a *handled* update stays remembered. CacheService caps entries
+  // at 6 hours, well past Telegram's retry window for a single update.
   DEDUP_TTL_SECONDS: 21600,
+  // How long an *in-progress* claim survives. Long enough to cover the
+  // slowest run (Gemini plus a sheet write), short enough that an execution
+  // killed mid-flight frees the update for retry within a couple of minutes.
+  DEDUP_INFLIGHT_SECONDS: 120,
   LOCK_TIMEOUT_MS: 30000
 };
 

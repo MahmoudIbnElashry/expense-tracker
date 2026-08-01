@@ -7,92 +7,229 @@
  *     text or photo -> GeminiExtractor.gs -> SheetWriter.gs -> confirmation
  */
 
+/**
+ * Web app entry point.
+ *
+ * Structured as a thin shell around processUpdate_ so there is exactly ONE
+ * return statement, sitting outside every try/catch/finally. No internal
+ * failure - a thrown service call, a redirect, a broken trace - can produce a
+ * path that returns anything other than a ContentService output.
+ */
 function doPost(e) {
   try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return ContentService.createTextOutput('OK');
-    }
-
-    const update = JSON.parse(e.postData.contents);
-    if (!update || typeof update.update_id === 'undefined') {
-      return ContentService.createTextOutput('OK');
-    }
-
-    if (isDuplicateUpdate_(update.update_id)) {
-      console.log('Skipping duplicate update_id ' + update.update_id);
-      return ContentService.createTextOutput('OK');
-    }
-
-    handleUpdate_(update);
+    processUpdate_(e);
   } catch (err) {
-    console.error('doPost error: ' + (err && err.stack ? err.stack : err));
+    // Each statement is individually guarded: if this block throws, the
+    // exception escapes doPost and Telegram gets a non-200 for every message.
+    try { traceError_('doPost', err); } catch (ignored) {}
+    try { notifyFailure_(safeChatId_(e), err); } catch (ignored) {}
   }
 
-  // Always 200 OK. Any non-200 (or a timeout) makes Telegram redeliver the
-  // same update, which is what caused the duplicate replies.
+  try { traceSave_(); } catch (ignored) {}
+
+  // The single exit. Telegram redelivers on any non-200.
   return ContentService.createTextOutput('OK');
 }
 
+/** Digs the chat ID out of a raw request without throwing. */
+function safeChatId_(e) {
+  try {
+    const update = JSON.parse(e.postData.contents);
+    const message = update.message || update.edited_message;
+    return message && message.chat ? message.chat.id : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/** All the real work. Free to throw or return early; doPost absorbs both. */
+function processUpdate_(e) {
+  trace_('doPost.enter');
+
+  if (!e || !e.postData || !e.postData.contents) {
+    trace_('doPost.exit', 'no postData - nothing to process');
+    return;
+  }
+
+  const body = e.postData.contents;
+  trace_('doPost.body', body.length + ' bytes: ' + body.slice(0, 800));
+
+  const update = JSON.parse(body);
+  if (!update || typeof update.update_id === 'undefined') {
+    trace_('doPost.exit', 'no update_id in payload');
+    return;
+  }
+
+  const updateId = update.update_id;
+  const message = update.message || update.edited_message;
+  const chatId = message && message.chat ? message.chat.id : null;
+  trace_('doPost.parsed', 'update_id=' + updateId + ' chatId=' + chatId);
+
+  const claim = claimUpdate_(updateId);
+  if (claim !== 'new') {
+    trace_('doPost.exit', 'skipping update_id ' + updateId + ' (' + claim + ')');
+    return;
+  }
+
+  let completed = false;
+  try {
+    handleUpdate_(update);
+    completed = true;
+    trace_('doPost.done');
+  } finally {
+    // Only a run that finished, or one that already replied, counts as
+    // handled. Anything else releases the claim so Telegram's retry can
+    // actually re-run it instead of being deduped into oblivion.
+    if (completed || wasReplySent_()) {
+      markUpdateHandled_(updateId);
+    } else {
+      releaseUpdateClaim_(updateId);
+      trace_('dedup.released', 'update_id ' + updateId + ' is retryable');
+    }
+  }
+}
+
 /**
- * Returns true if this update_id was already claimed by an earlier call.
- *
- * The check-and-set pair runs under a script lock so two concurrent
- * redeliveries of the same update cannot both see an empty cache. The claim is
- * recorded *before* processing, so a slow run that Telegram gives up on will
- * not be processed twice.
+ * Best-effort "something broke" reply. Swallows its own errors so a failure
+ * here can never mask the original one.
  */
-function isDuplicateUpdate_(updateId) {
+function notifyFailure_(chatId, err) {
+  if (!chatId) return;
+  try {
+    sendTelegramMessage(chatId, '⚠️ Something went wrong: ' +
+      String(err && err.message ? err.message : err).slice(0, 300) +
+      '\n\nSend /debug for the full trace.');
+  } catch (nested) {
+    traceError_('notifyFailure_', nested);
+  }
+}
+
+/**
+ * Two-phase deduplication.
+ *
+ * An earlier version claimed the update_id up front and never released it.
+ * Because Telegram retries any delivery it considers failed - including ones
+ * where Apps Script's 302 was rejected even though processing succeeded - a
+ * single failure made that update permanently unprocessable: every retry hit
+ * the claim and exited, so the message could never succeed no matter how many
+ * times it was redelivered.
+ *
+ * Now there are two markers:
+ *   inflight_<id>  short-lived, guards against genuine concurrent delivery.
+ *                  Expires on its own if an execution dies without cleanup.
+ *   done_<id>      long-lived, set only once the update is really handled.
+ *
+ * Returns 'new' (proceed), 'done' (already handled), or 'inflight'
+ * (another execution has it right now).
+ */
+function claimUpdate_(updateId) {
   const cache = CacheService.getScriptCache();
-  const key = 'update_' + updateId;
   const lock = LockService.getScriptLock();
 
   try {
     lock.waitLock(CONFIG.LOCK_TIMEOUT_MS);
   } catch (err) {
-    // Could not get the lock in time - another invocation is almost certainly
-    // handling this same update. Treat as duplicate rather than risk a double.
-    console.warn('Dedup lock timeout for update_id ' + updateId);
-    return true;
+    // Another invocation holds the lock, so it is handling this update.
+    traceError_('dedup.lockTimeout for update_id ' + updateId, err);
+    return 'inflight';
   }
 
   try {
-    if (cache.get(key)) return true;
-    cache.put(key, '1', CONFIG.DEDUP_TTL_SECONDS);
-    return false;
+    if (cache.get(doneKey_(updateId))) return 'done';
+    if (cache.get(inflightKey_(updateId))) return 'inflight';
+
+    cache.put(inflightKey_(updateId), '1', CONFIG.DEDUP_INFLIGHT_SECONDS);
+    return 'new';
+  } catch (err) {
+    // A cache failure must not block the message. A rare duplicate reply is a
+    // far better outcome than an expense that can never be logged.
+    traceError_('dedup.cache', err);
+    return 'new';
   } finally {
     lock.releaseLock();
   }
 }
 
+/** Marks an update as fully handled so retries are suppressed. */
+function markUpdateHandled_(updateId) {
+  try {
+    const cache = CacheService.getScriptCache();
+    cache.put(doneKey_(updateId), '1', CONFIG.DEDUP_TTL_SECONDS);
+    cache.remove(inflightKey_(updateId));
+  } catch (err) {
+    traceError_('dedup.markHandled', err);
+  }
+}
+
+/** Drops the in-flight claim so Telegram's next retry can re-run the update. */
+function releaseUpdateClaim_(updateId) {
+  try {
+    CacheService.getScriptCache().remove(inflightKey_(updateId));
+  } catch (err) {
+    traceError_('dedup.release', err);
+  }
+}
+
+function doneKey_(updateId) {
+  return 'done_' + updateId;
+}
+
+function inflightKey_(updateId) {
+  return 'inflight_' + updateId;
+}
+
+/**
+ * Tracks whether a reply actually reached Telegram this execution. An update
+ * that produced a reply is treated as handled even if a later step threw, so
+ * a retry cannot double-reply.
+ */
+var REPLY_SENT = false;
+
+function markReplySent_() {
+  REPLY_SENT = true;
+}
+
+function wasReplySent_() {
+  return REPLY_SENT === true;
+}
+
 /** Routes a single Telegram update. */
 function handleUpdate_(update) {
   const message = update.message || update.edited_message;
-  if (!message || !message.chat) return;
+  if (!message || !message.chat) {
+    trace_('route.skip', 'update has no message.chat');
+    return;
+  }
 
   const chatId = message.chat.id;
   if (!isAllowedChat_(chatId)) {
-    console.warn('Ignoring message from unauthorized chat ' + chatId);
+    trace_('allowlist.rejected', 'chatId=' + chatId);
     return;
   }
+  trace_('allowlist.passed', 'chatId=' + chatId);
 
   const text = (message.text || '').trim();
 
   if (text.charAt(0) === '/') {
+    trace_('route.command', text.split(/\s+/)[0]);
     handleCommand_(chatId, text);
     return;
   }
 
   const photoFileId = extractPhotoFileId_(message);
   if (photoFileId) {
+    trace_('route.photo');
     handleExpenseInput_(chatId, message, photoFileId);
     return;
   }
 
   if (text) {
+    trace_('route.text', JSON.stringify(text.slice(0, 200)));
     handleExpenseInput_(chatId, message, null);
     return;
   }
 
+  trace_('route.unsupported', 'no text and no photo - sending usage hint');
   sendTelegramMessage(chatId,
     'Send an expense as text (e.g. "120 taxi to work") or a receipt photo.\n' +
     'Use /report for a monthly summary.');
@@ -104,10 +241,15 @@ function handleUpdate_(update) {
  */
 function isAllowedChat_(chatId) {
   const allowed = getProp_('ALLOWED_CHAT_IDS');
-  if (!allowed) return true;
+  if (!allowed) {
+    trace_('allowlist.open', 'ALLOWED_CHAT_IDS not set');
+    return true;
+  }
 
   const ids = allowed.split(',').map(function (id) { return id.trim(); });
-  return ids.indexOf(String(chatId)) !== -1;
+  const match = ids.indexOf(String(chatId)) !== -1;
+  trace_('allowlist.check', 'chatId=' + chatId + ' configured=[' + ids.join(', ') + '] match=' + match);
+  return match;
 }
 
 /**
@@ -115,22 +257,40 @@ function isAllowedChat_(chatId) {
  * `photoFileId` is null for text-only messages.
  */
 function handleExpenseInput_(chatId, message, photoFileId) {
-  const messageDate = formatDateCairo_(new Date(message.date * 1000));
+  // message.date is seconds since epoch. If it were ever missing, the old
+  // code threw here - outside every try - and the request ended with no reply
+  // and no log. Compute it defensively and trace what was used.
+  let messageDate;
+  try {
+    const seconds = Number(message.date);
+    const stamp = isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
+    messageDate = formatDateCairo_(stamp);
+    trace_('date.resolved', 'raw=' + message.date + ' -> ' + messageDate);
+  } catch (err) {
+    traceError_('date.resolve', err);
+    messageDate = todayCairo_();
+  }
+
   const caption = (message.caption || '').trim();
 
   let extraction;
   try {
+    trace_('gemini.start', photoFileId ? 'photo' : 'text');
     extraction = photoFileId
       ? extractFromPhoto_(photoFileId, caption, messageDate)
       : extractFromText_(message.text, messageDate);
+    trace_('gemini.done', extraction);
   } catch (err) {
-    console.error('Extraction failed: ' + (err && err.stack ? err.stack : err));
-    sendTelegramMessage(chatId, "⚠️ Couldn't read that just now. Please send it again.");
+    traceError_('gemini', err);
+    sendTelegramMessage(chatId,
+      "⚠️ Couldn't read that just now.\n" + String(err.message).slice(0, 300));
     return;
   }
 
   // Never write a half-understood expense - ask instead.
   if (extraction.needs_clarification || !isValidAmount_(extraction.amount) || !extraction.description) {
+    trace_('clarify', 'needs_clarification=' + extraction.needs_clarification +
+      ' amount=' + extraction.amount + ' description=' + JSON.stringify(extraction.description));
     sendTelegramMessage(chatId, extraction.clarification_question || 'How much was it?');
     return;
   }
@@ -139,17 +299,23 @@ function handleExpenseInput_(chatId, message, photoFileId) {
     ? (caption ? 'Photo: ' + caption : 'Photo')
     : message.text;
 
+  let expenseId;
   try {
-    appendExpense_(extraction, rawInput);
+    trace_('sheet.start');
+    expenseId = appendExpense_(extraction, rawInput);
+    trace_('sheet.done', 'id=' + expenseId);
   } catch (err) {
-    console.error('Sheet write failed: ' + (err && err.stack ? err.stack : err));
-    sendTelegramMessage(chatId, "⚠️ Couldn't save that to the sheet. Please try again.");
+    traceError_('sheet', err);
+    sendTelegramMessage(chatId,
+      "⚠️ Couldn't save that to the sheet.\n" + String(err.message).slice(0, 300));
     return;
   }
 
+  trace_('reply.start');
   sendTelegramMessage(chatId,
     '✅ Logged: ' + extraction.description + ' — ' + formatMoney_(extraction.amount) + ' ' + CONFIG.CURRENCY + '\n' +
     '📌 ' + extraction.item + ' · ' + extraction.type);
+  trace_('reply.done');
 }
 
 /** Returns the file_id of the highest-resolution photo, or null. */
@@ -176,7 +342,7 @@ function extractPhotoFileId_(message) {
  * Redeploying an existing deployment keeps this URL, so it only changes if a
  * brand new deployment is created.
  */
-const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzRf-JgFH5RQPBJ3qGVQR5PH0Uqj8mPqCirGFe4KEu2UR6QsNa3SjUJB5k3F7J-eEi7dg/exec';
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzMyHDVOmTr3GR9wh92vysfzCxafR51oB0E23S-mTqsAHVGsponq2phN9nzMRDF5gQTEg/exec';
 
 /**
  * Run once from the Apps Script editor after deploying, to point Telegram at
