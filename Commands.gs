@@ -97,8 +97,10 @@ function handlePingCommand_(chatId) {
   try {
     const started = Date.now();
     const result = extractFromText_('test 5 coffee', todayCairo_());
+    const first = result.expenses[0] || {};
     lines.push('✅ gemini ' + (Date.now() - started) + 'ms -> ' +
-      result.item + ' / ' + result.amount);
+      first.item + ' / ' + first.amount +
+      ' (' + result.expenses.length + ' expense)');
   } catch (err) {
     lines.push('❌ gemini: ' + String(err.message).slice(0, 400));
   }

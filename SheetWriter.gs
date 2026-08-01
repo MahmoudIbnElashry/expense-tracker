@@ -21,37 +21,47 @@ function getExpenseSheet_() {
 }
 
 /**
- * Appends one expense row and returns its generated ID.
+ * Appends every expense from one message and returns the generated IDs.
  *
- * The read-max-ID and append pair runs under a script lock so two messages
- * arriving together cannot be assigned the same ID.
+ * The whole batch runs under a single script lock and a single setValues, so
+ * concurrent messages cannot interleave IDs and a multi-expense message is
+ * written as one unit rather than row by row.
  */
-function appendExpense_(extraction, rawInput) {
+function appendExpenses_(expenses, rawInput) {
   const lock = LockService.getScriptLock();
   lock.waitLock(CONFIG.LOCK_TIMEOUT_MS);
 
   try {
     const sheet = getExpenseSheet_();
-    const id = CONFIG.ID_PREFIX + nextExpenseNumber_(sheet);
-    const date = parseDdMmYyyy_(extraction.date) || new Date();
-    trace_('sheet.append', 'tab="' + sheet.getName() + '" lastRow=' + sheet.getLastRow() + ' id=' + id);
+    const startNumber = nextExpenseNumber_(sheet);
+    const ids = [];
 
-    sheet.appendRow([
-      id,
-      date,
-      extraction.description,
-      extraction.amount,
-      extraction.item,
-      extraction.type,
-      extraction.payment_method,
-      extraction.beneficiary,
-      rawInput
-    ]);
+    const rows = expenses.map(function (expense, index) {
+      const id = CONFIG.ID_PREFIX + (startNumber + index);
+      ids.push(id);
+      return [
+        id,
+        parseDdMmYyyy_(expense.date) || new Date(),
+        expense.description,
+        expense.amount,
+        expense.item,
+        expense.type,
+        expense.payment_method,
+        expense.beneficiary,
+        rawInput
+      ];
+    });
+
+    const firstRow = sheet.getLastRow() + 1;
+    trace_('sheet.append', 'tab="' + sheet.getName() + '" rows=' + rows.length +
+      ' startRow=' + firstRow + ' ids=' + ids.join(','));
+
+    sheet.getRange(firstRow, 1, rows.length, rows[0].length).setValues(rows);
 
     // Keep the date column reading as DD-MM-YYYY regardless of sheet locale.
-    sheet.getRange(sheet.getLastRow(), COLUMNS.DATE).setNumberFormat('dd-mm-yyyy');
+    sheet.getRange(firstRow, COLUMNS.DATE, rows.length, 1).setNumberFormat('dd-mm-yyyy');
 
-    return id;
+    return ids;
   } finally {
     lock.releaseLock();
   }

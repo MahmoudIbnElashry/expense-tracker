@@ -48,7 +48,13 @@ const CONFIG = {
   LOCK_TIMEOUT_MS: 30000
 };
 
-/** Fixed Item list - Gemini must classify into exactly one of these. */
+/**
+ * Fixed Item list - Gemini must classify into exactly one of these.
+ *
+ * Adding or renaming an entry only affects rows written from then on. Nothing
+ * rewrites the sheet, and /report aggregates whatever string each row already
+ * holds, so historical rows keep their original classification.
+ */
 const ITEMS = [
   'Food & Groceries',
   'Snacks',
@@ -57,6 +63,7 @@ const ITEMS = [
   'Cleaning & Household Supplies',
   'Bills & Utilities',
   'Activities & Entertainment',
+  'Education',
   'Family Allowance',
   'Clothing & Personal Care',
   'Charity & Gifts',

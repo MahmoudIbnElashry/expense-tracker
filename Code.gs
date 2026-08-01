@@ -296,10 +296,12 @@ function handleExpenseInput_(chatId, message, photoFileId) {
     return;
   }
 
-  // Never write a half-understood expense - ask instead.
-  if (extraction.needs_clarification || !isValidAmount_(extraction.amount) || !extraction.description) {
-    trace_('clarify', 'needs_clarification=' + extraction.needs_clarification +
-      ' amount=' + extraction.amount + ' description=' + JSON.stringify(extraction.description));
+  // Never write a half-understood expense - ask instead. All-or-nothing
+  // across the message: a partial write would be duplicated if the user
+  // resends the whole thing.
+  if (extraction.needs_clarification) {
+    trace_('clarify', 'count=' + extraction.expenses.length +
+      ' question=' + JSON.stringify(extraction.clarification_question));
     // The hint matters: nothing is stored between messages, so the way out of
     // a clarification is to say so, and that has to be discoverable.
     sendTelegramMessage(chatId,
@@ -312,11 +314,11 @@ function handleExpenseInput_(chatId, message, photoFileId) {
     ? (caption ? 'Photo: ' + caption : 'Photo')
     : message.text;
 
-  let expenseId;
+  let ids;
   try {
-    trace_('sheet.start');
-    expenseId = appendExpense_(extraction, rawInput);
-    trace_('sheet.done', 'id=' + expenseId);
+    trace_('sheet.start', extraction.expenses.length + ' expense(s)');
+    ids = appendExpenses_(extraction.expenses, rawInput);
+    trace_('sheet.done', 'ids=' + ids.join(','));
   } catch (err) {
     traceError_('sheet', err);
     sendTelegramMessage(chatId,
@@ -325,10 +327,35 @@ function handleExpenseInput_(chatId, message, photoFileId) {
   }
 
   trace_('reply.start');
-  sendTelegramMessage(chatId,
-    '✅ Logged: ' + extraction.description + ' — ' + formatMoney_(extraction.amount) + ' ' + CONFIG.CURRENCY + '\n' +
-    '📌 ' + extraction.item + ' · ' + extraction.type);
+  sendTelegramMessage(chatId, formatConfirmation_(extraction.expenses));
   trace_('reply.done');
+}
+
+/**
+ * One expense keeps the original two-line format. Several get a total plus
+ * one line each, so a shopping trip stays readable in a phone notification.
+ */
+function formatConfirmation_(expenses) {
+  if (expenses.length === 1) {
+    const only = expenses[0];
+    return '✅ Logged: ' + only.description + ' — ' +
+      formatMoney_(only.amount) + ' ' + CONFIG.CURRENCY + '\n' +
+      '📌 ' + only.item + ' · ' + only.type;
+  }
+
+  const total = expenses.reduce(function (sum, expense) {
+    return sum + Number(expense.amount);
+  }, 0);
+
+  const lines = ['✅ Logged ' + expenses.length + ' expenses — ' +
+    formatMoney_(total) + ' ' + CONFIG.CURRENCY + ' total'];
+
+  expenses.forEach(function (expense) {
+    lines.push('• ' + expense.description + ' — ' +
+      formatMoney_(expense.amount) + ' · ' + expense.item);
+  });
+
+  return lines.join('\n');
 }
 
 /** Returns the file_id of the highest-resolution photo, or null. */

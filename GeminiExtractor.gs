@@ -15,33 +15,54 @@ function buildExtractionSchema_() {
   return {
     type: 'object',
     properties: {
-      date: { type: 'string', description: 'DD-MM-YYYY' },
-      amount: { type: 'number', nullable: true, description: 'Total in EGP' },
-      description: { type: 'string', description: '2-5 words' },
-      item: { type: 'string', enum: ITEMS },
-      type: { type: 'string', enum: TYPES },
-      payment_method: { type: 'string', enum: PAYMENT_METHODS },
-      beneficiary: { type: 'string', enum: BENEFICIARIES },
+      expenses: {
+        type: 'array',
+        description: 'One object per distinct purchase in the message',
+        items: {
+          type: 'object',
+          properties: {
+            date: { type: 'string', description: 'DD-MM-YYYY' },
+            amount: { type: 'number', nullable: true, description: 'Total in EGP' },
+            description: { type: 'string', description: '2-5 words' },
+            item: { type: 'string', enum: ITEMS },
+            type: { type: 'string', enum: TYPES },
+            payment_method: { type: 'string', enum: PAYMENT_METHODS },
+            beneficiary: { type: 'string', enum: BENEFICIARIES }
+          },
+          required: [
+            'date', 'amount', 'description', 'item', 'type',
+            'payment_method', 'beneficiary'
+          ],
+          propertyOrdering: [
+            'date', 'amount', 'description', 'item', 'type',
+            'payment_method', 'beneficiary'
+          ]
+        }
+      },
       needs_clarification: { type: 'boolean' },
       clarification_question: { type: 'string', nullable: true }
     },
-    required: [
-      'date', 'amount', 'description', 'item', 'type',
-      'payment_method', 'beneficiary', 'needs_clarification'
-    ],
-    propertyOrdering: [
-      'needs_clarification', 'clarification_question', 'date', 'amount',
-      'description', 'item', 'type', 'payment_method', 'beneficiary'
-    ]
+    required: ['expenses', 'needs_clarification'],
+    propertyOrdering: ['needs_clarification', 'clarification_question', 'expenses']
   };
 }
 
 /** Builds the system instruction, injecting the message's own date. */
 function buildSystemInstruction_(messageDate) {
   return [
-    'You extract a single expense record from a personal-finance message and return JSON only.',
+    'You extract expense records from a personal-finance message and return JSON only.',
     'The user lives in Egypt. Amounts are Egyptian Pounds (EGP) unless stated otherwise.',
     'Input may be English, Arabic, or franco-Arabic. All output field values must be English.',
+    '',
+    'MULTIPLE EXPENSES',
+    '- A message may list several separate purchases, often one per line.',
+    '  Return one object in "expenses" for each distinct purchase.',
+    '- A single expense is still an array, with one object in it.',
+    '- Do not split one purchase into parts, and do not merge separate purchases.',
+    '  "2 kilos of milk for 70" is ONE expense of 70, not two of 35.',
+    '- Each expense gets its own date, payment method and beneficiary. Apply a',
+    '  detail stated once for the whole message (e.g. "all on instapay") to every',
+    '  expense in it.',
     '',
     'RULES',
     '- date: DD-MM-YYYY. Default to ' + messageDate + ' unless the user explicitly states another date',
@@ -55,13 +76,21 @@ function buildSystemInstruction_(messageDate) {
     '  Asmaa is the user\'s wife. Use "Family" for the household as a whole.',
     '',
     'CLARIFICATION',
-    '- If the amount or what was bought cannot be determined confidently, set',
-    '  needs_clarification to true and put ONE short question in clarification_question.',
+    '- If the amount or what was bought cannot be determined confidently for ANY',
+    '  expense in the message, set needs_clarification to true and put ONE short',
+    '  question in clarification_question. Name which item is unclear when the',
+    '  message contains several.',
     '- Never invent an amount or a description. Guessing is worse than asking.',
-    '- When needs_clarification is true, still fill the other fields with your best effort.',
+    '- When needs_clarification is true, still return your best effort in "expenses".',
     '',
     'Item list: ' + ITEMS.join(' | '),
     'Type list: ' + TYPES.join(' | '),
+    '',
+    'Item guidance:',
+    '- Education: school and nursery fees, tuition, courses, textbooks, stationery',
+    '  and school supplies, exam and enrolment fees. Anything paid FOR schooling.',
+    '- Family Allowance: discretionary spending money handed to Tamim or Asmaa to',
+    '  use as they wish. Not school costs, which are Education.',
     '',
     'Type guidance:',
     '- Commitments: recurring or obligatory (rent, bills, tuition, installments, allowance).',
@@ -299,15 +328,43 @@ function parseJsonLoose_(text) {
   }
 }
 
-/** Clamps every field to the fixed lists and applies the documented defaults. */
+/**
+ * Normalizes the model response into { expenses, needs_clarification,
+ * clarification_question }.
+ *
+ * Clarification is all-or-nothing across the message: if any one expense is
+ * unusable, nothing is logged. Logging a partial set would mean the user has
+ * to resend, and resending the whole message would then duplicate the rows
+ * that did go through.
+ */
 function normalizeExtraction_(raw, messageDate) {
+  const data = raw || {};
+  const list = Array.isArray(data.expenses) ? data.expenses : [];
+  const expenses = list.map(function (entry) {
+    return normalizeExpense_(entry, messageDate);
+  });
+
+  const anyUnusable = expenses.some(function (expense) {
+    return !isValidAmount_(expense.amount) || !expense.description;
+  });
+
+  return {
+    expenses: expenses,
+    needs_clarification: data.needs_clarification === true ||
+      expenses.length === 0 ||
+      anyUnusable,
+    clarification_question: typeof data.clarification_question === 'string' &&
+      data.clarification_question.trim()
+      ? data.clarification_question.trim()
+      : null
+  };
+}
+
+/** Clamps one expense's fields to the fixed lists and applies the defaults. */
+function normalizeExpense_(raw, messageDate) {
   const data = raw || {};
   const amount = Number(data.amount);
   const description = typeof data.description === 'string' ? data.description.trim() : '';
-
-  const needsClarification = data.needs_clarification === true ||
-    !isValidAmount_(amount) ||
-    !description;
 
   return {
     date: parseDdMmYyyy_(data.date) ? data.date.trim() : messageDate,
@@ -316,10 +373,6 @@ function normalizeExtraction_(raw, messageDate) {
     item: matchFromList_(data.item, ITEMS, DEFAULTS.ITEM),
     type: matchFromList_(data.type, TYPES, DEFAULTS.TYPE),
     payment_method: matchFromList_(data.payment_method, PAYMENT_METHODS, DEFAULTS.PAYMENT_METHOD),
-    beneficiary: matchFromList_(data.beneficiary, BENEFICIARIES, DEFAULTS.BENEFICIARY),
-    needs_clarification: needsClarification,
-    clarification_question: typeof data.clarification_question === 'string' && data.clarification_question.trim()
-      ? data.clarification_question.trim()
-      : null
+    beneficiary: matchFromList_(data.beneficiary, BENEFICIARIES, DEFAULTS.BENEFICIARY)
   };
 }
