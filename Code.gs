@@ -345,21 +345,51 @@ function extractPhotoFileId_(message) {
 const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzMyHDVOmTr3GR9wh92vysfzCxafR51oB0E23S-mTqsAHVGsponq2phN9nzMRDF5gQTEg/exec';
 
 /**
- * Run once from the Apps Script editor after deploying, to point Telegram at
- * this web app.
+ * The URL Telegram should call.
+ *
+ * Normally the Cloudflare Worker proxy (see worker/masrofna-proxy.js), set in
+ * the WEBHOOK_URL script property. Telegram will not follow the 302 that
+ * Apps Script serves /exec with, so registering WEB_APP_URL directly makes
+ * Telegram mark every delivery failed and stall the queue behind it.
+ */
+function webhookUrl_() {
+  const configured = getProp_('WEBHOOK_URL');
+  return configured && configured.trim() ? configured.trim() : WEB_APP_URL;
+}
+
+/**
+ * Run once from the Apps Script editor after deploying, or whenever the
+ * proxy URL changes, to tell Telegram where to send updates.
  */
 function setWebhook() {
-  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(WEB_APP_URL)) {
-    throw new Error('WEB_APP_URL is not a Web app /exec URL. Copy the "Web app" ' +
-      'entry from Manage deployments, not the "Library" one.');
+  const url = webhookUrl_();
+
+  if (!/^https:\/\//.test(url)) {
+    throw new Error('WEBHOOK_URL must be an https URL. Got: ' + url);
+  }
+  if (url.indexOf('/macros/library/') !== -1) {
+    throw new Error('That is the Library URL, which has no HTTP endpoint. ' +
+      'Use the "Web app" entry from Manage deployments.');
+  }
+  if (url === WEB_APP_URL) {
+    console.warn('Registering the Apps Script URL directly. Telegram does not ' +
+      'follow its 302, so deliveries will be marked failed and the update ' +
+      'queue will stall. Set WEBHOOK_URL to the Cloudflare Worker instead.');
   }
 
   const token = requireProp_('TELEGRAM_BOT_TOKEN');
-  const url = 'https://api.telegram.org/bot' + token + '/setWebhook' +
-    '?url=' + encodeURIComponent(WEB_APP_URL) +
+  let request = 'https://api.telegram.org/bot' + token + '/setWebhook' +
+    '?url=' + encodeURIComponent(url) +
     '&drop_pending_updates=true';
 
-  const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  // Must match TELEGRAM_SECRET_TOKEN in the Worker, when that is configured.
+  const secret = getProp_('TELEGRAM_SECRET_TOKEN');
+  if (secret) {
+    request += '&secret_token=' + encodeURIComponent(secret.trim());
+  }
+
+  const response = UrlFetchApp.fetch(request, { muteHttpExceptions: true });
+  console.log('Registered: ' + url);
   console.log(response.getContentText());
 }
 
@@ -377,8 +407,15 @@ function getWebhookInfo() {
   const info = JSON.parse(response.getContentText());
   console.log(JSON.stringify(info, null, 2));
 
-  if (info.result && info.result.url !== WEB_APP_URL) {
-    console.warn('Registered webhook does not match WEB_APP_URL. Run setWebhook.');
+  const expected = webhookUrl_();
+  if (info.result && info.result.url !== expected) {
+    console.warn('Registered webhook is ' + info.result.url +
+      ' but this script expects ' + expected + '. Run setWebhook.');
+  }
+  if (info.result && info.result.pending_update_count > 0) {
+    console.warn('pending_update_count=' + info.result.pending_update_count +
+      '. Telegram is not accepting the webhook response, so the queue is ' +
+      'stalled. Check that WEBHOOK_URL points at the Cloudflare Worker.');
   }
 }
 

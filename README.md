@@ -38,6 +38,33 @@ Run `checkSetup` from the editor to confirm which properties are set; it prints
 The `Date` column is written as a real date value formatted `dd-mm-yyyy`, so
 `/report` can filter by month reliably.
 
+## Webhook delivery
+
+Telegram does **not** follow the 302 that Apps Script serves `/exec` with. It
+reports `Wrong response from the webhook: 302 Found`, marks the delivery
+failed, and — because updates are delivered strictly in order — refuses to
+advance past it. Every message then blocks the next, even when the script
+processed it correctly. The redirect comes from Google's frontend before the
+script's response is served, so no change inside `doPost` can prevent it.
+
+A Cloudflare Worker (`worker/masrofna-proxy.js`) sits in front, follows the
+redirect, and returns a clean 200:
+
+```
+Telegram --POST--> Worker --POST--> /exec --302--> googleusercontent (200)
+                     |                                     |
+                     |<------------ follows ---------------+
+                     |
+           returns 200 to Telegram
+```
+
+Set `WEBHOOK_URL` to the Worker URL and run `setWebhook`. If `WEBHOOK_URL` is
+unset the script registers the Apps Script URL directly and `setWebhook` warns,
+because that is the stalling configuration.
+
+Verify with `getWebhookInfo`: `pending_update_count` should be `0` and there
+should be no `last_error_message`.
+
 ## Deploying
 
 ```sh

@@ -11,6 +11,12 @@
  *   GEMINI_API_KEY      - from Google AI Studio
  *
  * Optional Script Properties:
+ *   WEBHOOK_URL         - the Cloudflare Worker proxy URL Telegram should
+ *                         call. Required in practice: Telegram will not
+ *                         follow the 302 that Apps Script serves /exec with.
+ *                         See worker/masrofna-proxy.js.
+ *   TELEGRAM_SECRET_TOKEN - shared secret sent to setWebhook; must match the
+ *                         Worker's TELEGRAM_SECRET_TOKEN variable.
  *   GEMINI_MODEL        - override the default model name. Check
  *                         https://ai.google.dev/gemini-api/docs/models or run
  *                         /models if generateContent starts returning 404.
