@@ -171,7 +171,7 @@ function extractPhotoFileId_(message) {
  */
 function setWebhook() {
   const token = requireProp_('TELEGRAM_BOT_TOKEN');
-  const webAppUrl = 'https://script.google.com/macros/s/AKfycbzRf-JgFH5RQPBJ3qGVQR5PH0Uqj8mPqCirGFe4KEu2UR6QsNa3SjUJB5k3F7J-eEi7dg/exec';
+  const webAppUrl = 'https://script.google.com/macros/library/d/1SbUpsmtgPa5S60PRMOLfXVm7VJUsB2chEzCeDrR4gLeEbw74kC5FRLVL/3';
 
   const url = 'https://api.telegram.org/bot' + token + '/setWebhook' +
     '?url=' + encodeURIComponent(webAppUrl) +
